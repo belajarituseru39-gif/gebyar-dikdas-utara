@@ -146,14 +146,6 @@
                 </div>
                 
                 <div class="p-6 md:p-8 flex-1 overflow-y-auto">
-                    <div id="q-image-container" class="hidden mb-6 flex flex-col items-center justify-center">
-                        <div id="q-image-loader" class="hidden py-6 text-sm text-slate-500 flex items-center gap-2">
-                            <div class="w-5 h-5 border-2 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
-                            <span>Memuat gambar...</span>
-                        </div>
-                        <img id="q-image" alt="Ilustrasi Soal" referrerpolicy="no-referrer" decoding="sync" loading="eager" class="max-h-72 max-w-full w-auto rounded-xl border border-slate-200 shadow-sm object-contain bg-slate-50 p-1">
-                    </div>
-
                     <div id="q-text" class="text-lg text-slate-800 leading-relaxed whitespace-pre-wrap mb-8 text-justify">
                         <!-- Question text here -->
                     </div>
@@ -864,7 +856,7 @@
         let violationCount = 0;
         let violationLogs = [];
         let lastViolationTimestamp = 0;
-        const STORAGE_KEY = 'gebyar_dikdas_balut_2026_saved_state_v1';
+        const STORAGE_KEY = 'gebyar_dikdas_balut_2026_saved_state_v2';
         const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwZv9YNsahgOM2W4sp6bX9axsUWyF9y-PIiT8rWGWfy1IYD_Lg0UUE9ehRSKES_KV9k/exec';
         const preloadedImages = {};
 
@@ -941,7 +933,8 @@
                 formData.append('salah', '-');
                 formData.append('nilai', `PELANGGARAN ${violationCount}x`);
                 formData.append('pelanggaran', violationCount);
-                formData.append('keterangan_pelanggaran', `${reason} pada ${timestampStr}`);
+                formData.append('status_pelanggaran', `${reason} pada ${timestampStr}`);
+                formData.append('riwayat_pelanggaran', violationLogs.join(' | '));
 
                 await fetch(SCRIPT_URL, {
                     method: 'POST',
@@ -957,13 +950,12 @@
             if (currentScreen !== 'test') return;
 
             const now = Date.now();
-            // Mencegah perhitungan ganda jika event visibilitychange dan blur terpicu bersamaan
             if (now - lastViolationTimestamp < 1500) return;
             lastViolationTimestamp = now;
 
             violationCount++;
             const timestampStr = new Date().toLocaleString('id-ID');
-            violationLogs.push(`${ timestampStr } (${ reason })`);
+            violationLogs.push(`${timestampStr} (${reason})`);
 
             updateViolationHeaderUI();
             saveAppState();
@@ -983,14 +975,12 @@
         }
 
         function setupAntiCheatListeners() {
-            // Deteksi ketika murid membuka tab baru atau meminimalkan browser
             document.addEventListener('visibilitychange', () => {
                 if (document.hidden && currentScreen === 'test') {
                     recordViolation('Membuka Tab Baru / Meninggalkan Halaman Ujian');
                 }
             });
 
-            // Deteksi ketika jendela browser kehilangan fokus (berpindah ke aplikasi lain / split screen)
             window.addEventListener('blur', () => {
                 if (currentScreen === 'test') {
                     recordViolation('Berpindah Jendela / Membuka Aplikasi Lain');
@@ -1019,7 +1009,6 @@
                 violationCount = typeof saved.violationCount === 'number' ? saved.violationCount : 0;
                 violationLogs = Array.isArray(saved.violationLogs) ? saved.violationLogs : [];
 
-                // Isi kembali form login agar tidak hilang
                 document.getElementById('input-name').value = userData.name;
                 document.getElementById('input-school').value = userData.school;
                 document.getElementById('input-package').value = userData.packageKey;
@@ -1043,33 +1032,6 @@
             } catch (e) {
                 console.warn('Gagal memulihkan progres ujian:', e);
             }
-        }
-
-        function getProxyUrl(url) {
-            return `https://wsrv.nl/?url=${encodeURIComponent(url)}&output=webp`;
-        }
-
-        function preloadAllQuestionImages() {
-            Object.values(soalPackages).forEach(pkg => {
-                pkg.questions.forEach(q => {
-                    if (q.image && !preloadedImages[q.image]) {
-                        const primaryImg = new Image();
-                        primaryImg.referrerPolicy = 'no-referrer';
-                        primaryImg.onload = () => {
-                            preloadedImages[q.image] = q.image;
-                        };
-                        primaryImg.onerror = () => {
-                            const proxyUrl = getProxyUrl(q.image);
-                            const fallbackImg = new Image();
-                            fallbackImg.onload = () => {
-                                preloadedImages[q.image] = proxyUrl;
-                            };
-                            fallbackImg.src = proxyUrl;
-                        };
-                        primaryImg.src = q.image;
-                    }
-                });
-            });
         }
 
         // --- DOM ELEMENTS ---
@@ -1102,7 +1064,6 @@
                 });
             });
             
-            preloadAllQuestionImages();
             setupAntiCheatListeners();
             restoreAppState();
             lucide.createIcons();
@@ -1136,7 +1097,6 @@
             violationLogs = [];
             lastViolationTimestamp = Date.now();
             
-            // Acak urutan soal secara unik untuk peserta ini
             activeQuestions = shuffleArray(pkg.questions);
 
             document.getElementById('test-header-subtitle').textContent = `${userData.name} | ${userData.school}`;
@@ -1207,53 +1167,6 @@
             
             const badge = document.getElementById('q-badge');
             if(isMultiple) badge.classList.remove('hidden'); else badge.classList.add('hidden');
-
-            const imgContainer = document.getElementById('q-image-container');
-            const imgEl = document.getElementById('q-image');
-            const imgLoader = document.getElementById('q-image-loader');
-
-            if (q.image) {
-                imgContainer.classList.remove('hidden');
-                const targetSrc = preloadedImages[q.image] || q.image;
-
-                if (imgEl.dataset.questionImg !== q.image) {
-                    imgEl.dataset.questionImg = q.image;
-
-                    if (preloadedImages[q.image]) {
-                        imgLoader.classList.add('hidden');
-                        imgEl.classList.remove('hidden');
-                        imgEl.src = preloadedImages[q.image];
-                    } else {
-                        imgLoader.classList.remove('hidden');
-                        imgEl.classList.add('hidden');
-
-                        imgEl.onload = () => {
-                            preloadedImages[q.image] = imgEl.src;
-                            imgLoader.classList.add('hidden');
-                            imgEl.classList.remove('hidden');
-                        };
-
-                        imgEl.onerror = () => {
-                            const proxyUrl = getProxyUrl(q.image);
-                            if (imgEl.src !== proxyUrl) {
-                                imgEl.src = proxyUrl;
-                            } else {
-                                imgEl.onerror = null;
-                                imgLoader.classList.add('hidden');
-                                imgEl.classList.remove('hidden');
-                                imgEl.src = 'https://placehold.co/600x350/e2e8f0/475569?text=Gambar+Tidak+Dapat+Dimuat';
-                            }
-                        };
-
-                        imgEl.src = targetSrc;
-                    }
-                }
-            } else {
-                imgContainer.classList.add('hidden');
-                imgLoader.classList.add('hidden');
-                imgEl.dataset.questionImg = '';
-                imgEl.removeAttribute('src');
-            }
 
             document.getElementById('q-text').textContent = q.text;
 
