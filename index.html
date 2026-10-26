@@ -103,7 +103,7 @@
                             <li>Ujian ini memuat soal Pilihan Ganda & Pilihan Ganda Kompleks (jawaban lebih dari satu).</li>
                             <li>Anda dapat melompat ke soal lain menggunakan panel navigasi nomor di kanan.</li>
                             <li>Waktu terus berjalan setelah Anda menekan tombol mulai.</li>
-                            <li class="font-semibold text-red-600">Dilarang membuka tab baru, berpindah aplikasi, atau keluar dari halaman ujian. Setiap pelanggaran akan terdeteksi dan tercatat di server!</li>
+                            <li class="font-semibold text-red-600">Dilarang membuka tab baru, berpindah aplikasi, atau keluar dari halaman ujian. Perpindahan yang terdeteksi akan dicatat dan dikirim ke panitia.</li>
                         </ul>
                         <button onclick="startTest()" class="mt-6 w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200 shadow-md">
                             MULAI UJIAN
@@ -236,7 +236,7 @@
                     </div>
                     <div class="pt-2 border-t border-red-200 flex items-center text-xs text-red-700 font-semibold">
                         <i data-lucide="check-circle-2" class="w-4 h-4 mr-1.5 shrink-0"></i>
-                        <span>Pelanggaran ini telah dicatat dan dikirim ke Spreadsheet Panitia.</span>
+                        <span id="violation-save-status">Catatan pelanggaran sedang dikirim ke panitia...</span>
                     </div>
                 </div>
                 <button onclick="acknowledgeViolation()" class="w-full py-3.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl shadow-lg transition duration-200">
@@ -265,6 +265,8 @@
                 </div>
                 
                 <h1 class="text-3xl font-black text-slate-800 mb-1">Ujian Selesai!</h1>
+                <p id="save-status" role="status" aria-live="polite" class="mb-3 text-sm"></p>
+                <button id="retry-save" onclick="retrySaveResult()" class="hidden mb-4 px-4 py-2 bg-orange-600 text-white rounded-lg disabled:opacity-50">Kirim Ulang</button>
                 <p class="text-slate-500 mb-8">Terima kasih telah mengikuti Gebyar Dikdas Balikpapan Utara 2026.</p>
 
                 <div class="bg-slate-50 rounded-xl p-5 border border-slate-100 mb-8 text-left">
@@ -856,13 +858,79 @@
         let violationCount = 0;
         let violationLogs = [];
         let lastViolationTimestamp = 0;
-        const STORAGE_KEY = 'gebyar_dikdas_balut_2026_saved_state_v2';
-        const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwZv9YNsahgOM2W4sp6bX9axsUWyF9y-PIiT8rWGWfy1IYD_Lg0UUE9ehRSKES_KV9k/exec';
+        const STORAGE_KEY = 'gebyar_dikdas_balut_2026_hosting_luar_v1';
+        let sessionId = '';
+        let pendingResult = null;
+        let saveStatus = 'idle';
+        let sendingResult = false;
+
+        function newSessionId() {
+            return window.crypto && crypto.randomUUID ? crypto.randomUUID()
+                : Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+        }
+        // Alamat Apps Script panitia. HTML ini dapat di-host di layanan lain.
+        const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyYJl1EkSz5ZPc-UIaK4zeOPdiF6iix7EYepIwnDMmgaqtGSwZLEJ-r1pDvVJsc2Bk_/exec';
+        async function sendToSpreadsheet(data) {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(),45000);
+            try {
+                // URLSearchParams memakai form-urlencoded, tanpa header khusus/preflight.
+                const response = await fetch(SCRIPT_URL, {
+                    method:'POST',
+                    body:new URLSearchParams({payload:JSON.stringify(data)}),
+                    redirect:'follow',
+                    credentials:'omit',
+                    signal:controller.signal
+                });
+                if (!response.ok) throw new Error('Server merespons ' + response.status + '. Hubungi panitia.');
+                let result;
+                try { result = await response.json(); }
+                catch (_) { throw new Error('Respons server belum sesuai. Pastikan tambahan doPost sudah dipasang dan deployment diperbarui.'); }
+                if (!result || result.ok !== true || result.id !== data.id) {
+                    throw new Error(result && result.error || 'Penyimpanan belum dikonfirmasi oleh server.');
+                }
+                return result;
+            } catch(error) {
+                if (error.name === 'AbortError') throw new Error('Konfirmasi belum diterima. Tekan Kirim Ulang; hasil yang sama tidak dicatat dua kali.');
+                if (error instanceof TypeError) throw new Error('Koneksi ke Spreadsheet belum berhasil. Periksa internet dan akses Web App, lalu kirim ulang.');
+                throw error;
+            } finally { clearTimeout(timeout); }
+        }
+        function updateSaveUI(message) {
+            const el = document.getElementById('save-status');
+            el.textContent = message || (saveStatus === 'saved' ? 'Hasil berhasil tersimpan di Spreadsheet panitia.'
+                : saveStatus === 'saving' ? 'Sedang mengirim hasil ke Spreadsheet...'
+                : 'Hasil belum tersimpan. Tekan Kirim Ulang dan tunggu konfirmasi.');
+            el.className = 'mb-3 text-sm font-semibold ' + (saveStatus === 'saved' ? 'text-green-700' : 'text-orange-700');
+            document.getElementById('retry-save').classList.toggle('hidden',saveStatus === 'saved');
+            document.getElementById('retry-save').disabled = sendingResult;
+        }
+        async function retrySaveResult() {
+            if (!pendingResult || sendingResult) return;
+            sendingResult = true;
+            saveStatus = 'saving';
+            updateSaveUI();
+            saveAppState();
+            try {
+                await sendToSpreadsheet(pendingResult);
+                saveStatus = 'saved';
+                pendingResult = null;
+            } catch(error) {
+                saveStatus = 'failed';
+                updateSaveUI('Belum tersimpan: ' + error.message);
+            } finally {
+                sendingResult = false;
+                saveAppState();
+                if (saveStatus === 'saved') updateSaveUI();
+                document.getElementById('retry-save').disabled = false;
+            }
+        }
         const preloadedImages = {};
 
         function saveAppState() {
             try {
                 const stateToSave = {
+                    sessionId, pendingResult, saveStatus,
                     currentScreen,
                     userData,
                     activeQuestions,
@@ -921,28 +989,21 @@
             }
         }
 
-        async function sendViolationToSpreadsheet(reason, timestampStr) {
-            const pkg = soalPackages[userData.packageKey] || soalPackages.lcc_1;
+        async function sendViolationToSpreadsheet(reason,timestampStr) {
+            const count = violationCount;
+            const thisSession = sessionId;
+            const status = document.getElementById('violation-save-status');
+            status.textContent = 'Catatan pelanggaran sedang dikirim ke panitia...';
             try {
-                const formData = new URLSearchParams();
-                formData.append('waktu', timestampStr);
-                formData.append('nama', `${userData.name} [PELANGGARAN #${violationCount}: ${reason}]`);
-                formData.append('sekolah', userData.school);
-                formData.append('paket', `${pkg.title} (LOG PELANGGARAN: ${violationCount}x)`);
-                formData.append('benar', '-');
-                formData.append('salah', '-');
-                formData.append('nilai', `PELANGGARAN ${violationCount}x`);
-                formData.append('pelanggaran', violationCount);
-                formData.append('status_pelanggaran', `${reason} pada ${timestampStr}`);
-                formData.append('riwayat_pelanggaran', violationLogs.join(' | '));
-
-                await fetch(SCRIPT_URL, {
-                    method: 'POST',
-                    body: formData,
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+                await sendToSpreadsheet({
+                    jenis:'pelanggaran', id:sessionId + '_pelanggaran_' + count, sesi:sessionId,
+                    waktu:timestampStr, nama:userData.name, sekolah:userData.school,
+                    paket:soalPackages[userData.packageKey].title, pelanggaran:count,
+                    status_pelanggaran:reason, riwayat_pelanggaran:violationLogs.join(' | ')
                 });
-            } catch (err) {
-                console.warn('Gagal mengirim log pelanggaran langsung ke GSheet:', err);
+                if (sessionId === thisSession && violationCount === count) status.textContent = 'Pelanggaran telah tersimpan di Spreadsheet panitia.';
+            } catch(error) {
+                if (sessionId === thisSession && violationCount === count) status.textContent = 'Log langsung belum terkirim. Riwayat akan disertakan saat mengirim hasil ujian.';
             }
         }
 
@@ -1001,6 +1062,9 @@
                     school: saved.userData.school || '',
                     packageKey: soalPackages[saved.userData.packageKey] ? saved.userData.packageKey : 'lcc_1'
                 };
+                sessionId = saved.sessionId || newSessionId();
+                pendingResult = saved.pendingResult || null;
+                saveStatus = saved.saveStatus === 'saved' ? 'saved' : 'failed';
                 activeQuestions = saved.activeQuestions || [];
                 answers = saved.answers || {};
                 currentQIndex = typeof saved.currentQIndex === 'number' ? saved.currentQIndex : 0;
@@ -1028,6 +1092,7 @@
                     }
                 } else if (saved.currentScreen === 'result' && lastResult) {
                     showResults(lastResult.correct, lastResult.wrong, lastResult.score, lastResult.title);
+                    if (pendingResult) retrySaveResult();
                 }
             } catch (e) {
                 console.warn('Gagal memulihkan progres ujian:', e);
@@ -1088,6 +1153,9 @@
         }
 
         function startTest() {
+            sessionId = newSessionId();
+            pendingResult = null;
+            saveStatus = 'idle';
             const pkg = soalPackages[userData.packageKey];
             timeLeft = pkg.duration * 60;
             answers = {};
@@ -1292,6 +1360,7 @@
 
         // --- SUBMISSION LOGIC ---
         window.submitTest = async function() {
+            if (currentScreen !== 'test') return;
             clearInterval(timerInterval);
             hideSubmitModal();
             document.getElementById('modal-violation').classList.add('hidden');
@@ -1318,34 +1387,17 @@
             const total = activeQuestions.length;
             const wrong = total - correct;
             const score = Math.round((correct / total) * 100);
-            const statusPelanggaran = violationCount > 0 ? `Melanggar ${violationCount}x` : 'Bersih (0x)';
-            const paketWithViolation = violationCount > 0
-                ? `${pkg.title} [Pelanggaran: ${violationCount}x]`
-                : `${pkg.title} [Bersih]`;
-            
-            try {
-                const formData = new URLSearchParams();
-                formData.append('waktu', new Date().toLocaleString('id-ID'));
-                formData.append('nama', userData.name);
-                formData.append('sekolah', userData.school);
-                formData.append('paket', paketWithViolation);
-                formData.append('benar', correct);
-                formData.append('salah', wrong);
-                formData.append('nilai', score);
-                formData.append('pelanggaran', violationCount);
-                formData.append('status_pelanggaran', statusPelanggaran);
-                formData.append('riwayat_pelanggaran', violationLogs.join(' | '));
-
-                await fetch(SCRIPT_URL, {
-                    method: 'POST',
-                    body: formData,
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-                });
-            } catch (error) {
-                console.error('Data disubmit, tapi gagal tersambung ke GSheet (mungkin isu CORS).', error);
-            }
-
-            showResults(correct, wrong, score, pkg.title);
+            pendingResult = {
+                jenis:'hasil', id:sessionId + '_hasil', sesi:sessionId,
+                waktu:new Date().toLocaleString('id-ID',{timeZone:'Asia/Makassar'}),
+                nama:userData.name, sekolah:userData.school, paket:pkg.title,
+                benar:correct, salah:wrong, nilai:score, pelanggaran:violationCount,
+                status_pelanggaran:violationCount ? 'Melanggar ' + violationCount + 'x' : 'Bersih (0x)',
+                riwayat_pelanggaran:violationLogs.join(' | ')
+            };
+            saveStatus = 'saving';
+            showResults(correct,wrong,score,pkg.title);
+            await retrySaveResult();
         }
 
         function showResults(correct, wrong, score, title) {
@@ -1359,7 +1411,7 @@
 
             const resViolationEl = document.getElementById('res-violation');
             if (violationCount > 0) {
-                resViolationEl.textContent = `${violationCount} Kali (Tercatat di Server)`;
+                resViolationEl.textContent = `${violationCount} Kali`;
                 resViolationEl.className = 'py-2 font-bold text-red-600 text-right';
             } else {
                 resViolationEl.textContent = '0 Kali (Bersih)';
@@ -1367,9 +1419,16 @@
             }
 
             switchScreen('result');
+            updateSaveUI();
         }
 
         window.resetApp = function() {
+            if (pendingResult || sendingResult) {
+                alert('Hasil belum dikonfirmasi tersimpan. Tekan Kirim Ulang sebelum keluar.');
+                return;
+            }
+            sessionId = '';
+            saveStatus = 'idle';
             clearInterval(timerInterval);
             userData = { name: '', school: '', packageKey: 'lcc_1' };
             activeQuestions = [];
